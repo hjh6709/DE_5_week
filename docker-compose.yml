@@ -1,7 +1,7 @@
 services:
-  postgres:
+  airflow-db:
     image: postgres:16
-    container_name: de5_postgres_redshift_mock
+    container_name: de5_airflow_metadata_db
     environment:
       POSTGRES_USER: airflow
       POSTGRES_PASSWORD: airflow
@@ -14,38 +14,24 @@ services:
       timeout: 5s
       retries: 5
 
-  localstack:
-    image: localstack/localstack:3
-    container_name: de5_localstack
-    environment:
-      SERVICES: s3
-      AWS_ACCESS_KEY_ID: test
-      AWS_SECRET_ACCESS_KEY: test
-      AWS_DEFAULT_REGION: us-east-1
-    ports:
-      - "4566:4566"
-    volumes:
-      - localstack-data:/var/lib/localstack
-
   airflow:
     image: apache/airflow:3.0.0
     container_name: de5_airflow
     depends_on:
-      postgres:
+      airflow-db:
         condition: service_healthy
-      localstack:
-        condition: service_started
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS: admin:admin
       AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_PASSWORDS_FILE: /opt/airflow/data/simple_auth_manager_passwords.json
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
-      AIRFLOW_CONN_AWS_DEFAULT: aws://test:test@?region_name=us-east-1&endpoint_url=http%3A%2F%2Flocalstack%3A4566
-      AIRFLOW_CONN_REDSHIFT_DEFAULT: postgres://airflow:airflow@postgres:5432/airflow
-      AWS_ACCESS_KEY_ID: test
-      AWS_SECRET_ACCESS_KEY: test
-      AWS_DEFAULT_REGION: us-east-1
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-db:5432/airflow
+      AIRFLOW_CONN_AWS_DEFAULT: aws://:@?region_name=ap-northeast-2
+      AIRFLOW_CONN_REDSHIFT_DEFAULT: postgresql://REDSHIFT_USER:REDSHIFT_PASSWORD@REDSHIFT_ENDPOINT:5439/dev?iam_role=REDSHIFT_IAM_ROLE_ARN
+      AWS_ACCESS_KEY_ID: ""
+      AWS_SECRET_ACCESS_KEY: ""
+      AWS_DEFAULT_REGION: ap-northeast-2
+      DE5_S3_BUCKET: YOUR_BUCKET_NAME
       _PIP_ADDITIONAL_REQUIREMENTS: pandas boto3 psycopg2-binary
     ports:
       - "8080:8080"
@@ -61,6 +47,3 @@ services:
       airflow scheduler &
       exec airflow api-server --host 0.0.0.0 --port 8080
       "
-
-volumes:
-  localstack-data:

@@ -16,7 +16,7 @@ except ImportError:
 from airflow.hooks.base import BaseHook
 
 
-BUCKET = "de5-wanted-pipeline"
+BUCKET = os.environ.get("DE5_S3_BUCKET", "YOUR_BUCKET_NAME")
 DATA_PATH = "/opt/airflow/data/job_postings.csv"
 REQUIRED_COLUMNS = ["id", "title", "company", "location", "job_category", "due_date"]
 
@@ -30,21 +30,24 @@ def failure_callback(context):
 def get_s3_client():
     conn = BaseHook.get_connection("aws_default")
     extra = conn.extra_dejson
-    endpoint_url = extra.get("endpoint_url", "http://localstack:4566")
-    region_name = extra.get("region_name", "us-east-1")
-    return boto3.client(
-        "s3",
-        endpoint_url=endpoint_url,
-        region_name=region_name,
-        aws_access_key_id=conn.login or "test",
-        aws_secret_access_key=conn.password or "test",
-    )
+    region_name = extra.get("region_name") or os.environ.get("AWS_DEFAULT_REGION") or "ap-northeast-2"
+    kwargs = {"region_name": region_name}
+    if conn.login and conn.password:
+        kwargs["aws_access_key_id"] = conn.login
+        kwargs["aws_secret_access_key"] = conn.password
+    return boto3.client("s3", **kwargs)
 
 
 def ensure_bucket(s3):
+    if BUCKET == "YOUR_BUCKET_NAME":
+        raise ValueError("DE5_S3_BUCKET 환경변수 또는 BUCKET 값을 실제 AWS S3 버킷명으로 설정하세요.")
     buckets = [bucket["Name"] for bucket in s3.list_buckets().get("Buckets", [])]
     if BUCKET not in buckets:
-        s3.create_bucket(Bucket=BUCKET)
+        region = os.environ.get("AWS_DEFAULT_REGION", "ap-northeast-2")
+        if region == "us-east-1":
+            s3.create_bucket(Bucket=BUCKET)
+        else:
+            s3.create_bucket(Bucket=BUCKET, CreateBucketConfiguration={"LocationConstraint": region})
 
 
 def execution_date_from_context(context):
@@ -124,15 +127,12 @@ def wanted_pipeline():
 
     @task
     def load(processed_result):
-        s3 = get_s3_client()
-        obj = s3.get_object(Bucket=processed_result["bucket"], Key=processed_result["key"])
-        df = pd.read_json(StringIO(obj["Body"].read().decode("utf-8")))
-
         redshift_conn = BaseHook.get_connection("redshift_default")
+        extra = redshift_conn.extra_dejson
         conn = psycopg2.connect(
             host=redshift_conn.host,
-            port=redshift_conn.port or 5432,
-            dbname=redshift_conn.schema or "airflow",
+            port=redshift_conn.port or 5439,
+            dbname=redshift_conn.schema or "dev",
             user=redshift_conn.login,
             password=redshift_conn.password,
         )
@@ -153,39 +153,41 @@ def wanted_pipeline():
         GROUP BY job_category
         ORDER BY cnt DESC;
         """
+        s3_uri = f"s3://{processed_result['bucket']}/{processed_result['key']}"
+        iam_role = extra.get("iam_role") or os.environ.get("REDSHIFT_IAM_ROLE")
+        access_key = os.environ.get("AWS_ACCESS_KEY_ID")
+        secret_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
+
+        if iam_role and iam_role != "REDSHIFT_IAM_ROLE_ARN":
+            copy_auth = f"IAM_ROLE '{iam_role}'"
+        elif access_key and secret_key:
+            copy_auth = f"CREDENTIALS 'aws_access_key_id={access_key};aws_secret_access_key={secret_key}'"
+        else:
+            raise ValueError("Redshift COPY를 위해 redshift_default extra의 iam_role 또는 AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY가 필요합니다.")
+
+        copy_sql = f"""
+        COPY job_postings
+        FROM '{s3_uri}'
+        {copy_auth}
+        FORMAT AS JSON 'auto'
+        TIMEFORMAT 'auto'
+        TRUNCATECOLUMNS;
+        """
 
         try:
             with conn:
                 with conn.cursor() as cur:
                     cur.execute(create_sql)
                     cur.execute("TRUNCATE TABLE job_postings;")
-                    rows = [
-                        (
-                            str(row.id),
-                            row.title,
-                            row.company,
-                            row.location,
-                            row.job_category,
-                            row.due_date,
-                        )
-                        for row in df.itertuples(index=False)
-                    ]
-                    cur.executemany(
-                        """
-                        INSERT INTO job_postings
-                            (id, title, company, location, job_category, due_date)
-                        VALUES (%s, %s, %s, %s, %s, %s);
-                        """,
-                        rows,
-                    )
-                    print(f"Redshift COPY 대체 적재 완료: {len(rows)} rows")
+                    cur.execute(copy_sql)
+                    print(f"Redshift COPY 적재 완료: {s3_uri}")
                     cur.execute(query_sql)
                     results = cur.fetchall()
 
             print("Redshift 직군별 공고 수")
             for job_category, cnt in results:
                 print(f"{job_category}: {cnt}")
-            return {"loaded_rows": len(df), "category_counts": results}
+            return {"s3_uri": s3_uri, "category_counts": results}
         finally:
             conn.close()
 

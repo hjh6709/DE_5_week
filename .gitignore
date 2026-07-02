@@ -24,3 +24,8 @@ wordcount_output/
 
 # Temporary backup files
 *.bak
+
+# Generated submission archives/documents
+*.zip
+*.pdf
+*.pages
