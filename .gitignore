@@ -1,0 +1,26 @@
+.DS_Store
+
+# Python caches
+__pycache__/
+*.py[cod]
+
+# Jupyter/Colab local state
+.ipynb_checkpoints/
+
+# Airflow runtime output
+logs/
+
+# Local virtual environments and env files
+.venv/
+venv/
+env/
+.env
+
+# Spark/assignment runtime outputs
+sensor_parquet_output/
+sensor_parquet_from_mock_s3/
+factory_error_rate_output/
+wordcount_output/
+
+# Temporary backup files
+*.bak
